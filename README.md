@@ -16,7 +16,7 @@ graph TD
     A[fuel-prices-with-coords.csv <br/>Raw input dataset] --> B{Geocoding Pipeline}
     B -->|Option A: AWS Location Service| C[aws_geocode_parallel.ipynb <br/>Multi-threaded AWS geocoding]
     B -->|Option B: OSM + Nominatim + Gemini| D[data.py <br/>Free fallbacks + AI matching]
-    C --> E[truck_stops_aws_geocoded_combined.csv <br/>Merged geocoded dataset]
+    C --> E[truck_stops_geocoded_combined.csv <br/>Merged geocoded dataset]
     D --> E
     E --> F[Django Management Command <br/>import_truck_stops]
     F --> G[(db.sqlite3 <br/>Django Database)]
@@ -73,7 +73,7 @@ python spotter/manage.py migrate
 We have a pre-geocoded and cleaned dataset ready for ingestion. Run the custom Django management command to load it into the database:
 
 ```bash
-python spotter/manage.py import_truck_stops " output/data.csv" --clear
+python spotter/manage.py import_truck_stops "output/data.csv" --clear
 ```
 
 > [!TIP]
