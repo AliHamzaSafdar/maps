@@ -1,0 +1,200 @@
+import json
+
+from django.http import JsonResponse
+from django.shortcuts import render
+
+from . import aws_routes, osrm_routes
+from .geocode import geocode, suggest
+from .geo import (
+    DEFAULT_RADIUS_KM,
+    DEFAULT_RANGE_MILES,
+    DEFAULT_TRUCK_MPG,
+    plan_fuel_stops,
+    stops_along_route,
+)
+from .models import Place
+
+ROUTE_COLORS = ["#16a34a", "#2563eb", "#9333ea"]  # cheapest gets green
+PRICE_FIELDS = {"average": "average_retail_price", "max": "highest_price"}
+
+
+def _parse_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _selected_coords(request, prefix):
+    """(lon, lat) chosen from an autocomplete suggestion, or None."""
+    lon = _parse_float(request.GET.get(f"{prefix}_sel_lon"))
+    lat = _parse_float(request.GET.get(f"{prefix}_sel_lat"))
+    return (lon, lat) if lon is not None and lat is not None else None
+
+
+def suggest_view(request):
+    """JSON location suggestions for the autocomplete dropdown.
+
+    Always uses the free OpenStreetMap (Nominatim) geocoder, regardless of the
+    selected routing provider — this is just typeahead, like Google Maps search.
+    """
+    query = request.GET.get("q", "").strip()
+    if len(query) < 3:
+        return JsonResponse({"results": []})
+    try:
+        results = suggest(query, "free")
+    except Exception as exc:
+        return JsonResponse({"results": [], "error": str(exc)}, status=200)
+    return JsonResponse({"results": results})
+
+
+def _resolve_endpoints(request, provider):
+    """Return ((start_lon, start_lat), (end_lon, end_lat), error).
+
+    Honours the input-mode dropdown: either parse coordinates directly or
+    geocode the typed place names with the chosen provider.
+    """
+    if request.GET.get("input_mode") == "location":
+        start_q = request.GET.get("start_location", "").strip()
+        end_q = request.GET.get("end_location", "").strip()
+        if not (start_q and end_q):
+            return None, None, None  # incomplete; not an error yet
+        # Use coords from a picked autocomplete suggestion when present, so the
+        # user gets exactly the place they chose rather than a re-geocode guess.
+        start_sel = _selected_coords(request, "start")
+        end_sel = _selected_coords(request, "end")
+        try:
+            start = start_sel or geocode(start_q, provider)
+            end = end_sel or geocode(end_q, provider)
+        except Exception as exc:
+            return None, None, f"Geocoding failed: {exc}"
+        if not start:
+            return None, None, f"Could not find a location for '{start_q}'."
+        if not end:
+            return None, None, f"Could not find a location for '{end_q}'."
+        return start, end, None
+
+    coords = [
+        _parse_float(request.GET.get(k))
+        for k in ("start_lon", "start_lat", "end_lon", "end_lat")
+    ]
+    if None in coords:
+        return None, None, None  # incomplete
+    return (coords[0], coords[1]), (coords[2], coords[3]), None
+
+
+def planner(request):
+    """Render the route planner; compute routes + fuel stops when input is given."""
+    provider = request.GET.get("provider", "aws")
+    input_mode = request.GET.get("input_mode", "coords")
+    price_choice = request.GET.get("price_field", "average")
+    price_attr = PRICE_FIELDS.get(price_choice, "average_retail_price")
+
+    ctx = {
+        "form": {
+            "provider": provider,
+            "input_mode": input_mode,
+            "price_field": price_choice,
+            "start_lon": request.GET.get("start_lon", ""),
+            "start_lat": request.GET.get("start_lat", ""),
+            "end_lon": request.GET.get("end_lon", ""),
+            "end_lat": request.GET.get("end_lat", ""),
+            "start_location": request.GET.get("start_location", ""),
+            "end_location": request.GET.get("end_location", ""),
+            "start_sel_lon": request.GET.get("start_sel_lon", ""),
+            "start_sel_lat": request.GET.get("start_sel_lat", ""),
+            "end_sel_lon": request.GET.get("end_sel_lon", ""),
+            "end_sel_lat": request.GET.get("end_sel_lat", ""),
+            "mpg": request.GET.get("mpg", DEFAULT_TRUCK_MPG),
+            "range_miles": request.GET.get("range_miles", DEFAULT_RANGE_MILES),
+            "radius_km": request.GET.get("radius_km", DEFAULT_RADIUS_KM),
+        },
+        "results_json": "null",
+        "error": None,
+    }
+
+    mpg = _parse_float(request.GET.get("mpg")) or DEFAULT_TRUCK_MPG
+    range_miles = _parse_float(request.GET.get("range_miles")) or DEFAULT_RANGE_MILES
+    radius_km = _parse_float(request.GET.get("radius_km")) or DEFAULT_RADIUS_KM
+
+    start, end, error = _resolve_endpoints(request, provider)
+    if error:
+        ctx["error"] = error
+        return render(request, "places/planner.html", ctx)
+    if start is None or end is None:
+        return render(request, "places/planner.html", ctx)  # first load / incomplete
+
+    router = aws_routes if provider == "aws" else osrm_routes
+    try:
+        # One route only — scanning every stop against multiple alternatives is slow.
+        raw_routes = router.get_routes(start[0], start[1], end[0], end[1], max_routes=1)
+    except Exception as exc:  # surface provider/credential errors to the user
+        ctx["error"] = f"Routing failed ({provider}): {exc}"
+        return render(request, "places/planner.html", ctx)
+
+    if not raw_routes:
+        ctx["error"] = "No routes found between those points."
+        return render(request, "places/planner.html", ctx)
+
+    all_stops = list(
+        Place.objects.filter(
+            geocoded_lat__isnull=False, geocoded_lon__isnull=False
+        )
+    )
+
+    results = []
+    for route in raw_routes:
+        along = stops_along_route(all_stops, route["coordinates"], radius_km)
+        plan = plan_fuel_stops(along, route["distance_km"], range_miles, mpg, price_attr)
+
+        fuel_stops = [
+            {
+                "order": c["order"],
+                "name": c["stop"].name,
+                "city": c["stop"].city,
+                "state": c["stop"].state,
+                "lon": c["stop"].geocoded_lon,
+                "lat": c["stop"].geocoded_lat,
+                "price": round(c["price"], 3),
+                "avg_price": float(c["stop"].average_retail_price) if c["stop"].average_retail_price is not None else None,
+                "max_price": float(c["stop"].highest_price) if c["stop"].highest_price is not None else None,
+                "along_miles": round(c["along_km"] / 1.609344, 1),
+                "off_km": round(c["off_km"], 1),
+            }
+            for c in plan["fuel_stops"]
+        ]
+
+        results.append(
+            {
+                "coordinates": route["coordinates"],
+                "distance_km": round(route["distance_km"], 1),
+                "distance_miles": round(route["distance_km"] / 1.609344, 1),
+                "duration_h": round(route["duration_s"] / 3600.0, 1),
+                "stops_available": len(along),
+                "feasible": plan["feasible"],
+                "total_gallons": round(plan["total_gallons"], 1),
+                "total_cost": round(plan["total_cost"], 2) if plan["total_cost"] is not None else None,
+                "fuel_stops": fuel_stops,
+            }
+        )
+
+    # Cheapest total fuel cost first; infeasible / no-cost routes sort to the end.
+    results.sort(
+        key=lambda r: (not r["feasible"], r["total_cost"] is None, r["total_cost"] or 0)
+    )
+    for i, r in enumerate(results):
+        r["color"] = ROUTE_COLORS[i % len(ROUTE_COLORS)]
+        r["label"] = f"Route {i + 1}" + (" (cheapest)" if i == 0 else "")
+
+    ctx["results_json"] = json.dumps(
+        {
+            "origin": list(start),
+            "destination": list(end),
+            "provider": provider,
+            "price_field": price_choice,
+            "range_miles": range_miles,
+            "mpg": mpg,
+            "routes": results,
+        }
+    )
+    return render(request, "places/planner.html", ctx)

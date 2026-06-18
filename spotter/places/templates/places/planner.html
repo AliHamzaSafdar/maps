@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fuel Route Planner</title>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <style>
+    :root { --bg:#0f172a; --panel:#1e293b; --line:#334155; --text:#e2e8f0; --muted:#94a3b8; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, sans-serif; color:var(--text); background:var(--bg); }
+    .layout { display:flex; height:100vh; }
+    .sidebar { width:400px; min-width:400px; overflow-y:auto; padding:20px; border-right:1px solid var(--line); }
+    #map { flex:1; }
+    h1 { font-size:18px; margin:0 0 16px; }
+    form { display:grid; gap:10px; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .row3 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    label { font-size:12px; color:var(--muted); display:block; margin-bottom:2px; }
+    input, select { width:100%; padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); }
+    button { padding:10px; border:0; border-radius:6px; background:#2563eb; color:#fff; font-weight:600; cursor:pointer; }
+    button:hover { background:#1d4ed8; }
+    .error { background:#7f1d1d; padding:10px; border-radius:6px; margin:12px 0; font-size:13px; }
+    .routes { margin-top:18px; display:grid; gap:12px; }
+    .card { background:var(--panel); border:1px solid var(--line); border-left:5px solid var(--c); border-radius:8px; padding:12px; }
+    .card h3 { margin:0 0 8px; font-size:15px; display:flex; align-items:center; gap:8px; }
+    .swatch { width:12px; height:12px; border-radius:3px; background:var(--c); display:inline-block; }
+    .total { font-size:22px; font-weight:700; color:#fff; margin:4px 0 8px; }
+    .stat { display:flex; justify-content:space-between; font-size:13px; padding:2px 0; }
+    .stat b { color:#fff; }
+    .infeasible { color:#fca5a5; font-size:12px; margin-top:6px; }
+    .fuelups { margin-top:10px; border-top:1px solid var(--line); padding-top:8px; }
+    .fuelup { display:flex; gap:8px; font-size:12px; padding:4px 0; align-items:baseline; }
+    .badge { background:var(--c); color:#fff; width:18px; height:18px; min-width:18px; border-radius:50%; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+    .fuelup .nm { color:#fff; }
+    .fuelup .meta { color:var(--muted); }
+    .hint { font-size:11px; color:var(--muted); margin-top:4px; }
+    .ac { position:relative; }
+    .ac-list { position:absolute; left:0; right:0; top:100%; z-index:20; background:var(--panel); border:1px solid var(--line); border-radius:6px; margin-top:2px; max-height:220px; overflow-y:auto; display:none; }
+    .ac-list.open { display:block; }
+    .ac-item { padding:8px 10px; font-size:12px; cursor:pointer; border-bottom:1px solid var(--line); }
+    .ac-item:last-child { border-bottom:0; }
+    .ac-item:hover, .ac-item.active { background:#334155; color:#fff; }
+    .ac-empty { padding:8px 10px; font-size:12px; color:var(--muted); }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <div class="sidebar">
+    <h1>⛽ Fuel Route Planner</h1>
+    <form method="get">
+      <div class="row3">
+        <div>
+          <label>Routing provider</label>
+          <select name="provider">
+            <option value="aws"{% if form.provider == "aws" %} selected{% endif %}>AWS Location (truck)</option>
+            <option value="free"{% if form.provider == "free" %} selected{% endif %}>OpenStreetMap (free)</option>
+          </select>
+        </div>
+        <div>
+          <label>Optimize on price</label>
+          <select name="price_field">
+            <option value="average"{% if form.price_field == "average" %} selected{% endif %}>Average price</option>
+            <option value="max"{% if form.price_field == "max" %} selected{% endif %}>Max price</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label>Input type</label>
+        <select name="input_mode" id="input_mode">
+          <option value="coords"{% if form.input_mode == "coords" %} selected{% endif %}>Coordinates (lon, lat)</option>
+          <option value="location"{% if form.input_mode == "location" %} selected{% endif %}>Location name</option>
+        </select>
+      </div>
+
+      <div id="coords-fields">
+        <div class="row">
+          <div><label>Start longitude</label><input name="start_lon" value="{{ form.start_lon }}" placeholder="-87.6298"></div>
+          <div><label>Start latitude</label><input name="start_lat" value="{{ form.start_lat }}" placeholder="41.8781"></div>
+        </div>
+        <div class="row">
+          <div><label>Dest. longitude</label><input name="end_lon" value="{{ form.end_lon }}" placeholder="-118.2437"></div>
+          <div><label>Dest. latitude</label><input name="end_lat" value="{{ form.end_lat }}" placeholder="34.0522"></div>
+        </div>
+      </div>
+
+      <div id="location-fields">
+        <div class="ac">
+          <label>Start location</label>
+          <input name="start_location" id="start_location" autocomplete="off" value="{{ form.start_location }}" placeholder="Start typing a city…">
+          <input type="hidden" name="start_sel_lon" id="start_sel_lon" value="{{ form.start_sel_lon }}">
+          <input type="hidden" name="start_sel_lat" id="start_sel_lat" value="{{ form.start_sel_lat }}">
+          <div class="ac-list" id="start_location-list"></div>
+        </div>
+        <div class="ac">
+          <label>Destination location</label>
+          <input name="end_location" id="end_location" autocomplete="off" value="{{ form.end_location }}" placeholder="Start typing a city…">
+          <input type="hidden" name="end_sel_lon" id="end_sel_lon" value="{{ form.end_sel_lon }}">
+          <input type="hidden" name="end_sel_lat" id="end_sel_lat" value="{{ form.end_sel_lat }}">
+          <div class="ac-list" id="end_location-list"></div>
+        </div>
+      </div>
+
+      <div class="row3">
+        <div><label>Range (miles)</label><input name="range_miles" value="{{ form.range_miles }}"></div>
+        <div><label>Truck MPG</label><input name="mpg" value="{{ form.mpg }}"></div>
+      </div>
+      <div><label>Stop search radius (km)</label><input name="radius_km" value="{{ form.radius_km }}"></div>
+      <button type="submit">Plan route &amp; fuel stops</button>
+      <div class="hint">Up to 3 routes; the truck refuels before its range runs out, choosing the cheapest stops on the selected price column. Ranked by total fuel cost.</div>
+    </form>
+
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <div class="routes" id="routes"></div>
+  </div>
+  <div id="map"></div>
+</div>
+
+<script id="results-data" type="application/json">{{ results_json|safe }}</script>
+<script>
+  // Toggle coordinate vs location inputs based on the dropdown.
+  const modeSelect = document.getElementById('input_mode');
+  function syncMode() {
+    const isLoc = modeSelect.value === 'location';
+    document.getElementById('coords-fields').style.display = isLoc ? 'none' : 'block';
+    document.getElementById('location-fields').style.display = isLoc ? 'block' : 'none';
+  }
+  modeSelect.addEventListener('change', syncMode);
+  syncMode();
+
+  // Location autocomplete: query /suggest/ and let the user pick the exact place.
+  function setupAutocomplete(prefix) {
+    const input = document.getElementById(prefix + '_location');
+    const list = document.getElementById(prefix + '_location-list');
+    const selLon = document.getElementById(prefix + '_sel_lon');
+    const selLat = document.getElementById(prefix + '_sel_lat');
+    let timer = null, items = [], active = -1;
+
+    function close() { list.classList.remove('open'); list.innerHTML = ''; active = -1; }
+
+    function render() {
+      if (!items.length) { list.innerHTML = '<div class="ac-empty">No matches</div>'; list.classList.add('open'); return; }
+      list.innerHTML = items.map((r, i) =>
+        `<div class="ac-item${i === active ? ' active' : ''}" data-i="${i}">${r.label}</div>`
+      ).join('');
+      list.classList.add('open');
+      list.querySelectorAll('.ac-item').forEach(el => {
+        el.addEventListener('mousedown', e => { e.preventDefault(); choose(+el.dataset.i); });
+      });
+    }
+
+    function choose(i) {
+      const r = items[i]; if (!r) return;
+      input.value = r.label;
+      selLon.value = r.lon; selLat.value = r.lat;  // exact picked coords
+      close();
+    }
+
+    input.addEventListener('input', () => {
+      selLon.value = ''; selLat.value = '';  // typing invalidates a prior pick
+      const q = input.value.trim();
+      clearTimeout(timer);
+      if (q.length < 3) { close(); return; }
+      timer = setTimeout(async () => {
+        try {
+          const res = await fetch(`suggest/?q=${encodeURIComponent(q)}`);
+          const json = await res.json();
+          items = json.results || []; active = -1; render();
+        } catch (e) { close(); }
+      }, 300);
+    });
+
+    input.addEventListener('keydown', e => {
+      if (!list.classList.contains('open')) return;
+      if (e.key === 'ArrowDown') { active = Math.min(active + 1, items.length - 1); render(); e.preventDefault(); }
+      else if (e.key === 'ArrowUp') { active = Math.max(active - 1, 0); render(); e.preventDefault(); }
+      else if (e.key === 'Enter' && active >= 0) { choose(active); e.preventDefault(); }
+      else if (e.key === 'Escape') { close(); }
+    });
+    document.addEventListener('click', e => { if (!input.contains(e.target)) close(); });
+  }
+  setupAutocomplete('start');
+  setupAutocomplete('end');
+
+  const data = JSON.parse(document.getElementById('results-data').textContent);
+
+  const map = new maplibregl.Map({
+    container: 'map',
+    style: {
+      version: 8,
+      sources: {
+        osm: { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, attribution: '© OpenStreetMap contributors' }
+      },
+      layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+    },
+    center: [-95, 39],
+    zoom: 3.5
+  });
+
+  function money(v) { return v == null ? '—' : '$' + v.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
+  function price(v) { return v == null ? '—' : '$' + Number(v).toFixed(3); }
+
+  map.on('load', () => {
+    if (!data || !data.routes || !data.routes.length) return;
+    const bounds = new maplibregl.LngLatBounds();
+
+    // Draw alternatives first, cheapest route last so it sits on top.
+    data.routes.slice().reverse().forEach((r, idx) => {
+      const id = 'route-' + idx + '-' + Math.random().toString(36).slice(2);
+      map.addSource(id, { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: r.coordinates } } });
+      map.addLayer({ id: id, type: 'line', source: id, paint: { 'line-color': r.color, 'line-width': 5, 'line-opacity': 0.85 } });
+      r.coordinates.forEach(c => bounds.extend(c));
+
+      // Numbered fuel-up markers along this route.
+      r.fuel_stops.forEach(s => {
+        const el = document.createElement('div');
+        el.style.cssText = `background:${r.color};color:#fff;width:24px;height:24px;border-radius:50%;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font:700 12px system-ui;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.5);`;
+        el.textContent = s.order;
+        new maplibregl.Marker({ element: el })
+          .setLngLat([s.lon, s.lat])
+          .setPopup(new maplibregl.Popup({ offset: 14 }).setHTML(
+            `<b>Fuel stop ${s.order}: ${s.name}</b><br>${s.city}, ${s.state}<br>Avg ${price(s.avg_price)} · Max ${price(s.max_price)} /gal<br><small>${s.along_miles} mi into trip · ${s.off_km} km off route</small>`
+          ))
+          .addTo(map);
+      });
+    });
+
+    new maplibregl.Marker({ color: '#22c55e' }).setLngLat(data.origin).setPopup(new maplibregl.Popup().setText('Start')).addTo(map);
+    new maplibregl.Marker({ color: '#ef4444' }).setLngLat(data.destination).setPopup(new maplibregl.Popup().setText('Destination')).addTo(map);
+    map.fitBounds(bounds, { padding: 60 });
+
+    // Sidebar cards.
+    const container = document.getElementById('routes');
+    const summary = document.createElement('div');
+    summary.className = 'hint';
+    summary.style.marginBottom = '4px';
+    summary.textContent = `Provider: ${data.provider === 'aws' ? 'AWS Location' : 'OpenStreetMap (free)'} · optimizing on ${data.price_field} price · ${data.range_miles} mi range · ${data.mpg} mpg`;
+    container.appendChild(summary);
+    data.routes.forEach(r => {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.style.setProperty('--c', r.color);
+      const fuelupsHtml = r.fuel_stops.length
+        ? `<div class="fuelups">${r.fuel_stops.map(s =>
+            `<div class="fuelup"><span class="badge">${s.order}</span><span><span class="nm">${s.name}</span> <span class="meta">— ${s.city}, ${s.state} · ${price(s.price)}/gal · ${s.along_miles} mi in</span></span></div>`
+          ).join('')}</div>`
+        : '';
+      card.innerHTML = `
+        <h3><span class="swatch"></span>${r.label}</h3>
+        <div class="total">${money(r.total_cost)}</div>
+        <div class="stat"><span>Total fuel</span><b>${r.total_gallons} gal</b></div>
+        <div class="stat"><span>Distance</span><b>${r.distance_miles} mi (${r.distance_km} km)</b></div>
+        <div class="stat"><span>Drive time</span><b>${r.duration_h} h</b></div>
+        <div class="stat"><span>Fuel stops needed</span><b>${r.fuel_stops.length}</b></div>
+        <div class="stat"><span>Stops available on route</span><b>${r.stops_available}</b></div>
+        ${r.feasible ? '' : '<div class="infeasible">⚠ A stretch longer than the vehicle range has no truck stop — trip not feasible as planned.</div>'}
+        ${fuelupsHtml}
+      `;
+      container.appendChild(card);
+    });
+  });
+</script>
+</body>
+</html>
