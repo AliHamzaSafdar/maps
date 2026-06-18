@@ -42,14 +42,15 @@ class StopsAlongRouteTests(SimpleTestCase):
         result = geo.stops_along_route([a, b], self.route, radius_km=8)
         self.assertEqual([s for s, _, _, _, _ in result], [b, a])
 
-    def test_snapped_coords_are_on_route(self):
-        # The nearest vertex for a stop exactly on the route should be that
-        # same vertex — snapped lon/lat should equal the route vertex coords.
-        result = geo.stops_along_route([stop(1.0, 0.0)], self.route, radius_km=8)
+    def test_returns_real_station_coords(self):
+        # Markers are no longer snapped to the route — a stop slightly off the
+        # line must report its OWN coords, since the route is later detoured to it.
+        result = geo.stops_along_route([stop(1.0, 0.03)], self.route, radius_km=8)
         self.assertEqual(len(result), 1)
-        _, _, _, slon, slat = result[0]
-        self.assertAlmostEqual(slon, 1.0, places=3)
-        self.assertAlmostEqual(slat, 0.0, places=3)
+        _, off_km, _, lon, lat = result[0]
+        self.assertAlmostEqual(lon, 1.0, places=6)
+        self.assertAlmostEqual(lat, 0.03, places=6)
+        self.assertGreater(off_km, 0.0)  # genuinely off the route line
 
 class FuelStopPlanTests(SimpleTestCase):
     def along(self, *entries):
@@ -95,6 +96,28 @@ class FuelStopPlanTests(SimpleTestCase):
             self.along((3.0, 100 * KM_PER_MILE)), total_km, range_miles=500, mpg=10
         )
         self.assertAlmostEqual(plan["total_gallons"], 50.0, places=3)
+
+
+class MetricsFromLegsTests(SimpleTestCase):
+    def test_fill_to_full_cost_and_arrival(self):
+        # start -> stop1 -> end. Legs: 300 mi to the stop, 100 mi to the end.
+        # 10 mpg, 500 mi range -> capacity 50 gal.
+        # Refill at stop1 = 300 mi burn = 30 gal @ $3 = $90.
+        # Arrival = 50 - 100/10 = 40 gal.
+        legs_km = [300 * KM_PER_MILE, 100 * KM_PER_MILE]
+        m = geo.metrics_from_legs(legs_km, [3.0], range_miles=500, mpg=10)
+        self.assertTrue(m["feasible"])
+        self.assertAlmostEqual(m["total_cost"], 90.0, places=2)
+        self.assertAlmostEqual(m["arrival_gallons"], 40.0, places=2)
+        self.assertAlmostEqual(m["total_gallons"], 40.0, places=2)
+        self.assertEqual(m["tank_capacity_gallons"], 50.0)
+
+    def test_leg_over_range_is_infeasible(self):
+        # A single leg longer than the tank range can't be driven.
+        legs_km = [600 * KM_PER_MILE, 50 * KM_PER_MILE]
+        m = geo.metrics_from_legs(legs_km, [3.0], range_miles=500, mpg=10)
+        self.assertFalse(m["feasible"])
+        self.assertIsNone(m["arrival_gallons"])
 
 
 def entries_to_along(entries):

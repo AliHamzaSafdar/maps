@@ -10,6 +10,7 @@ from .geo import (
     DEFAULT_RANGE_MILES,
     DEFAULT_TRUCK_MPG,
     in_usa,
+    metrics_from_legs,
     plan_fuel_stops,
     stops_along_route,
 )
@@ -181,6 +182,32 @@ def planner(request):
     for route in raw_routes:
         along = stops_along_route(all_stops, route["coordinates"], radius_km)
         plan = plan_fuel_stops(along, route["distance_km"], range_miles, mpg, price_attr)
+        selected = plan["fuel_stops"]  # already in along (travel) order
+
+        # Geometry + metrics default to the straight route; Pass 2 below replaces
+        # them with a path that actually detours through each chosen pump.
+        geometry = route["coordinates"]
+        distance_km = route["distance_km"]
+        duration_s = route["duration_s"]
+        metrics = plan
+
+        # Pass 2 — re-route through the pumps so the line visibly visits them and
+        # the cost reflects the real detour. One extra routing call per route that
+        # has stops (so the default single route adds just one call); skipped when
+        # there are no stops to visit.
+        if selected:
+            waypoints = [list(start)] + [[c["lon"], c["lat"]] for c in selected] + [list(end)]
+            try:
+                via = router.get_route_via(waypoints)
+            except Exception:
+                via = None  # provider hiccup → keep the straight route, never error out
+            if via and len(via["legs_km"]) == len(selected) + 1:
+                geometry = via["coordinates"]
+                distance_km = via["distance_km"]
+                duration_s = via["duration_s"]
+                metrics = metrics_from_legs(
+                    via["legs_km"], [c["price"] for c in selected], range_miles, mpg
+                )
 
         fuel_stops = [
             {
@@ -188,29 +215,29 @@ def planner(request):
                 "name": c["stop"].name,
                 "city": c["stop"].city,
                 "state": c["stop"].state,
-                "lon": c["snapped_lon"],
-                "lat": c["snapped_lat"],
+                "lon": c["lon"],  # real station location; the route now detours to it
+                "lat": c["lat"],
                 "price": round(c["price"], 3),
                 "avg_price": float(c["stop"].average_retail_price) if c["stop"].average_retail_price is not None else None,
                 "max_price": float(c["stop"].highest_price) if c["stop"].highest_price is not None else None,
                 "along_miles": round(c["along_km"] / 1.609344, 1),
                 "off_km": round(c["off_km"], 1),
             }
-            for c in plan["fuel_stops"]
+            for c in selected
         ]
 
         results.append(
             {
-                "coordinates": route["coordinates"],
-                "distance_km": round(route["distance_km"], 1),
-                "distance_miles": round(route["distance_km"] / 1.609344, 1),
-                "duration_h": round(route["duration_s"] / 3600.0, 1),
+                "coordinates": geometry,
+                "distance_km": round(distance_km, 1),
+                "distance_miles": round(distance_km / 1.609344, 1),
+                "duration_h": round(duration_s / 3600.0, 1),
                 "stops_available": len(along),
-                "feasible": plan["feasible"],
-                "total_gallons": round(plan["total_gallons"], 1),
-                "total_cost": round(plan["total_cost"], 2) if plan["total_cost"] is not None else None,
-                "arrival_gallons": round(plan["arrival_gallons"], 1) if plan["arrival_gallons"] is not None else None,
-                "tank_capacity_gallons": round(plan["tank_capacity_gallons"], 1),
+                "feasible": metrics["feasible"],
+                "total_gallons": round(metrics["total_gallons"], 1),
+                "total_cost": round(metrics["total_cost"], 2) if metrics["total_cost"] is not None else None,
+                "arrival_gallons": round(metrics["arrival_gallons"], 1) if metrics["arrival_gallons"] is not None else None,
+                "tank_capacity_gallons": round(metrics["tank_capacity_gallons"], 1),
                 "fuel_stops": fuel_stops,
             }
         )

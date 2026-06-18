@@ -100,15 +100,19 @@ def downsample_route(route_coords, cum, step_km):
 
 
 def stops_along_route(stops, route_coords, radius_km=DEFAULT_RADIUS_KM):
-    """Stops within radius_km of the route, with their snapped position on it.
+    """Stops within radius_km of the route, with their real position and offset.
 
-    Uses the fast downsampled-vertex scan to find nearby stops. For each
-    qualifying stop the coordinates of its nearest route vertex are returned
-    as (snapped_lon, snapped_lat) so the map marker can be placed directly ON
-    the route line rather than at the real GPS position of the station.
+    Uses the fast downsampled-vertex scan to find nearby stops. Each qualifying
+    stop is returned at its REAL GPS coordinates (no snapping to the route line):
+    the route itself is later re-drawn to detour through the chosen pumps, so the
+    marker must sit at the true station, not a faked point on the centerline.
+
+    `off_route_km` is the stop's distance from the route line — how far the truck
+    must detour to reach it. `along_route_km` is how far into the trip it sits,
+    used to order stops and bound legs.
 
     Returns a list of
-        (stop, off_route_km, along_route_km, snapped_lon, snapped_lat)
+        (stop, off_route_km, along_route_km, lon, lat)
     sorted by distance travelled along the route (start → destination).
     """
     cum = cumulative_km(route_coords)
@@ -128,8 +132,8 @@ def stops_along_route(stops, route_coords, radius_km=DEFAULT_RADIUS_KM):
             if best_d is None or d < best_d:
                 best_d, best_i = d, i
         if best_d <= radius_km:
-            # Snap the marker to the nearest vertex on the route
-            found.append((stop, best_d, alongs[best_i], lons[best_i], lats[best_i]))
+            # Keep the real station coords; `along` comes from the nearest vertex.
+            found.append((stop, best_d, alongs[best_i], lon, lat))
     found.sort(key=lambda t: t[2])
     return found
 
@@ -166,10 +170,10 @@ def plan_fuel_stops(
             "off_km": off,
             "along_km": along,
             "price": float(getattr(s, price_attr)),
-            "snapped_lon": slon,
-            "snapped_lat": slat,
+            "lon": lon,
+            "lat": lat,
         }
-        for (s, off, along, slon, slat) in along_stops
+        for (s, off, along, lon, lat) in along_stops
         if getattr(s, price_attr) is not None
     ]
     priced.sort(key=lambda c: c["along_km"])
@@ -223,4 +227,40 @@ def plan_fuel_stops(
         "total_cost": total_cost,
         "arrival_gallons": arrival_gallons,
         "tank_capacity_gallons": tank_capacity_gallons,
+    }
+
+
+def metrics_from_legs(legs_km, stop_prices, range_miles=DEFAULT_RANGE_MILES, mpg=DEFAULT_TRUCK_MPG):
+    """Exact fill-to-full fuel metrics from the REAL per-leg distances.
+
+    `legs_km` is the distance of each leg of start → s1 → … → sN → end, so
+    `len(legs_km) == len(stop_prices) + 1`. These come from re-routing through
+    the chosen pumps as waypoints, so they already include the detour off the
+    highway to each station — no snapping, no guessing.
+
+    The truck departs full and tops up to full at every stop, so the fuel pumped
+    at stop i is the burn on the leg that ARRIVES there, charged at stop i's
+    price. The final leg (last stop → destination) is covered by fuel already in
+    the tank, so arrival fuel = capacity − that leg's burn. A leg longer than one
+    tank makes the trip infeasible.
+    """
+    capacity = range_miles / mpg
+    total_miles = sum(legs_km) / KM_PER_MILE
+    feasible = all((leg / KM_PER_MILE) <= range_miles + 1e-6 for leg in legs_km)
+
+    total_cost = None
+    if stop_prices:
+        total_cost = 0.0
+        for price, leg_km in zip(stop_prices, legs_km):  # leg ARRIVING at each stop
+            total_cost += (leg_km / KM_PER_MILE / mpg) * price
+
+    final_leg_miles = legs_km[-1] / KM_PER_MILE if legs_km else 0.0
+    arrival_gallons = max(0.0, capacity - final_leg_miles / mpg) if feasible else None
+
+    return {
+        "feasible": feasible,
+        "total_gallons": total_miles / mpg,
+        "total_cost": total_cost,
+        "arrival_gallons": arrival_gallons,
+        "tank_capacity_gallons": capacity,
     }
