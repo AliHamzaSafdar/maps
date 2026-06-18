@@ -107,7 +107,17 @@
         <div><label>Range (miles)</label><input name="range_miles" value="{{ form.range_miles }}"></div>
         <div><label>Truck MPG</label><input name="mpg" value="{{ form.mpg }}"></div>
       </div>
-      <div><label>Stop search radius (km)</label><input name="radius_km" value="{{ form.radius_km }}"></div>
+      <div class="row3">
+        <div><label>Stop search radius (km)</label><input name="radius_km" value="{{ form.radius_km }}"></div>
+        <div>
+          <label>Routes to show</label>
+          <select name="max_routes">
+            <option value="1"{% if form.max_routes|stringformat:"s" == "1" %} selected{% endif %}>1 route</option>
+            <option value="2"{% if form.max_routes|stringformat:"s" == "2" %} selected{% endif %}>2 routes</option>
+            <option value="3"{% if form.max_routes|stringformat:"s" == "3" %} selected{% endif %}>3 routes</option>
+          </select>
+        </div>
+      </div>
       <button type="submit">Plan route &amp; fuel stops</button>
       <div class="hint">Up to 3 routes; the truck refuels before its range runs out, choosing the cheapest stops on the selected price column. Ranked by total fuel cost.</div>
     </form>
@@ -254,6 +264,8 @@
         <div class="stat"><span>Distance</span><b>${r.distance_miles} mi (${r.distance_km} km)</b></div>
         <div class="stat"><span>Drive time</span><b>${r.duration_h} h</b></div>
         <div class="stat"><span>Fuel stops needed</span><b>${r.fuel_stops.length}</b></div>
+        <div class="stat"><span>Tank capacity</span><b>${r.tank_capacity_gallons} gal</b></div>
+        <div class="stat"><span>Fuel left at the end</span><b>${r.arrival_gallons == null ? '—' : r.arrival_gallons + ' gal'}</b></div>
         <div class="stat"><span>Stops available on route</span><b>${r.stops_available}</b></div>
         ${r.feasible ? '' : '<div class="infeasible">⚠ A stretch longer than the vehicle range has no truck stop — trip not feasible as planned.</div>'}
         ${fuelupsHtml}

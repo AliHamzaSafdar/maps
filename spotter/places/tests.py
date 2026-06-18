@@ -28,7 +28,7 @@ class StopsAlongRouteTests(SimpleTestCase):
     def test_includes_on_route_stop_with_along_distance(self):
         result = geo.stops_along_route([stop(1.0, 0.0)], self.route, radius_km=8)
         self.assertEqual(len(result), 1)
-        _, off_km, along_km = result[0]
+        _, off_km, along_km, _slon, _slat = result[0]
         self.assertAlmostEqual(off_km, 0.0, places=3)
         self.assertAlmostEqual(along_km, geo.haversine_km(0, 0, 1, 0), delta=0.5)
 
@@ -40,13 +40,21 @@ class StopsAlongRouteTests(SimpleTestCase):
         a = stop(2.0, 0.0)
         b = stop(0.0, 0.0)
         result = geo.stops_along_route([a, b], self.route, radius_km=8)
-        self.assertEqual([s for s, _, _ in result], [b, a])
+        self.assertEqual([s for s, _, _, _, _ in result], [b, a])
 
+    def test_snapped_coords_are_on_route(self):
+        # The nearest vertex for a stop exactly on the route should be that
+        # same vertex — snapped lon/lat should equal the route vertex coords.
+        result = geo.stops_along_route([stop(1.0, 0.0)], self.route, radius_km=8)
+        self.assertEqual(len(result), 1)
+        _, _, _, slon, slat = result[0]
+        self.assertAlmostEqual(slon, 1.0, places=3)
+        self.assertAlmostEqual(slat, 0.0, places=3)
 
 class FuelStopPlanTests(SimpleTestCase):
     def along(self, *entries):
-        """Build stops_along_route-style tuples: (stop_with_price, off_km, along_km)."""
-        return [(stop(0, 0, price), 1.0, along_km) for price, along_km in entries]
+        """Build stops_along_route-style 5-tuples: (stop, off_km, along_km, slon, slat)."""
+        return [(stop(0, 0, price), 1.0, along_km, 0.0, 0.0) for price, along_km in entries]
 
     def test_one_tank_trip_picks_single_cheapest(self):
         # 300-mile trip, 500-mile range -> no mandatory stop, one fill at cheapest.
@@ -90,4 +98,5 @@ class FuelStopPlanTests(SimpleTestCase):
 
 
 def entries_to_along(entries):
-    return [(SimpleNamespace(geocoded_lon=0, geocoded_lat=0, average_retail_price=p), 1.0, km) for p, km in entries]
+    return [(SimpleNamespace(geocoded_lon=0, geocoded_lat=0, average_retail_price=p), 1.0, km, 0.0, 0.0) for p, km in entries]
+

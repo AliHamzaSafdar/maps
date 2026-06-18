@@ -4,11 +4,12 @@ from django.http import JsonResponse
 from django.shortcuts import render
 
 from . import aws_routes, osrm_routes
-from .geocode import geocode, suggest
+from .geocode import geocode, reverse_country, suggest
 from .geo import (
     DEFAULT_RADIUS_KM,
     DEFAULT_RANGE_MILES,
     DEFAULT_TRUCK_MPG,
+    in_usa,
     plan_fuel_stops,
     stops_along_route,
 )
@@ -72,6 +73,10 @@ def _resolve_endpoints(request, provider):
             return None, None, f"Could not find a location for '{start_q}'."
         if not end:
             return None, None, f"Could not find a location for '{end_q}'."
+        if not in_usa(*start):
+            return None, None, f"'{start_q}' is outside the US. Both locations must be in the US."
+        if not in_usa(*end):
+            return None, None, f"'{end_q}' is outside the US. Both locations must be in the US."
         return start, end, None
 
     coords = [
@@ -80,7 +85,32 @@ def _resolve_endpoints(request, provider):
     ]
     if None in coords:
         return None, None, None  # incomplete
-    return (coords[0], coords[1]), (coords[2], coords[3]), None
+    start, end = (coords[0], coords[1]), (coords[2], coords[3])
+    # Raw coordinates skip the geocoder's country filter, so verify each point
+    # is in the US ourselves.
+    err = _coord_us_error(start, "Start", provider) or _coord_us_error(end, "End", provider)
+    if err:
+        return None, None, err
+    return start, end, None
+
+
+def _coord_us_error(point, label, provider):
+    """Error string if a manually-entered (lon, lat) is outside the US, else None.
+
+    Fast-rejects far-away points with a bounding box, then reverse-geocodes the
+    survivors to catch border-region points (e.g. Toronto) the box can't. A
+    geocoder hiccup falls back to the box result so a transient failure doesn't
+    block a legitimate US point.
+    """
+    if not in_usa(*point):
+        return f"{label} location is outside the US. Both locations must be in the US."
+    try:
+        country = reverse_country(point[0], point[1], provider)
+    except Exception:
+        country = None
+    if country is not None and country not in ("us", "usa"):
+        return f"{label} location is in '{country.upper()}', not the US. Both locations must be in the US."
+    return None
 
 
 def planner(request):
@@ -108,6 +138,7 @@ def planner(request):
             "mpg": request.GET.get("mpg", DEFAULT_TRUCK_MPG),
             "range_miles": request.GET.get("range_miles", DEFAULT_RANGE_MILES),
             "radius_km": request.GET.get("radius_km", DEFAULT_RADIUS_KM),
+            "max_routes": request.GET.get("max_routes", 1),
         },
         "results_json": "null",
         "error": None,
@@ -116,6 +147,10 @@ def planner(request):
     mpg = _parse_float(request.GET.get("mpg")) or DEFAULT_TRUCK_MPG
     range_miles = _parse_float(request.GET.get("range_miles")) or DEFAULT_RANGE_MILES
     radius_km = _parse_float(request.GET.get("radius_km")) or DEFAULT_RADIUS_KM
+    # Default 1 route; allow up to 3 alternatives. Clamp so URL-tampering can't
+    # ask the router for an unbounded number of routes.
+    max_routes = int(_parse_float(request.GET.get("max_routes")) or 1)
+    max_routes = max(1, min(max_routes, 3))
 
     start, end, error = _resolve_endpoints(request, provider)
     if error:
@@ -126,8 +161,8 @@ def planner(request):
 
     router = aws_routes if provider == "aws" else osrm_routes
     try:
-        # One route only — scanning every stop against multiple alternatives is slow.
-        raw_routes = router.get_routes(start[0], start[1], end[0], end[1], max_routes=1)
+        # More alternatives = more per-stop scanning, so this is user-capped at 3.
+        raw_routes = router.get_routes(start[0], start[1], end[0], end[1], max_routes=max_routes)
     except Exception as exc:  # surface provider/credential errors to the user
         ctx["error"] = f"Routing failed ({provider}): {exc}"
         return render(request, "places/planner.html", ctx)
@@ -153,8 +188,8 @@ def planner(request):
                 "name": c["stop"].name,
                 "city": c["stop"].city,
                 "state": c["stop"].state,
-                "lon": c["stop"].geocoded_lon,
-                "lat": c["stop"].geocoded_lat,
+                "lon": c["snapped_lon"],
+                "lat": c["snapped_lat"],
                 "price": round(c["price"], 3),
                 "avg_price": float(c["stop"].average_retail_price) if c["stop"].average_retail_price is not None else None,
                 "max_price": float(c["stop"].highest_price) if c["stop"].highest_price is not None else None,
@@ -174,6 +209,8 @@ def planner(request):
                 "feasible": plan["feasible"],
                 "total_gallons": round(plan["total_gallons"], 1),
                 "total_cost": round(plan["total_cost"], 2) if plan["total_cost"] is not None else None,
+                "arrival_gallons": round(plan["arrival_gallons"], 1) if plan["arrival_gallons"] is not None else None,
+                "tank_capacity_gallons": round(plan["tank_capacity_gallons"], 1),
                 "fuel_stops": fuel_stops,
             }
         )
@@ -197,4 +234,8 @@ def planner(request):
             "routes": results,
         }
     )
+    if request.GET.get("format") == "json" or "application/json" in request.headers.get("Accept", ""):
+        return JsonResponse(json.loads(ctx["results_json"]))
+
     return render(request, "places/planner.html", ctx)
+

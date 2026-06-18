@@ -16,6 +16,24 @@ DEFAULT_RANGE_MILES = 500.0
 DEFAULT_RADIUS_KM = 8.0
 
 
+# Approximate bounding boxes covering US territory: (min_lon, min_lat, max_lon,
+# max_lat). The contiguous box leaks a little into Canada/Mexico but is fine for
+# a "is this roughly in the US?" guard; Alaska and Hawaii get their own boxes.
+US_BBOXES = (
+    (-125.0, 24.4, -66.9, 49.4),    # contiguous 48 states
+    (-179.2, 51.0, -129.9, 71.5),   # Alaska
+    (-160.3, 18.8, -154.7, 22.3),   # Hawaii
+)
+
+
+def in_usa(lon, lat):
+    """True if (lon, lat) falls within any US bounding box."""
+    return any(
+        min_lon <= lon <= max_lon and min_lat <= lat <= max_lat
+        for min_lon, min_lat, max_lon, max_lat in US_BBOXES
+    )
+
+
 def haversine_km(lon1, lat1, lon2, lat2):
     """Great-circle distance between two (lon, lat) points, in km."""
     lon1, lat1, lon2, lat2 = map(radians, (lon1, lat1, lon2, lat2))
@@ -82,12 +100,16 @@ def downsample_route(route_coords, cum, step_km):
 
 
 def stops_along_route(stops, route_coords, radius_km=DEFAULT_RADIUS_KM):
-    """Stops within `radius_km` of the route, with their position along it.
+    """Stops within radius_km of the route, with their snapped position on it.
 
-    Returns a list of (stop, off_route_km, along_route_km) sorted by distance
-    travelled along the route (so it reads start -> destination). The route is
-    downsampled to ~radius_km vertex spacing first, which keeps the proximity
-    scan fast on the dense polylines that routing engines return.
+    Uses the fast downsampled-vertex scan to find nearby stops. For each
+    qualifying stop the coordinates of its nearest route vertex are returned
+    as (snapped_lon, snapped_lat) so the map marker can be placed directly ON
+    the route line rather than at the real GPS position of the station.
+
+    Returns a list of
+        (stop, off_route_km, along_route_km, snapped_lon, snapped_lat)
+    sorted by distance travelled along the route (start → destination).
     """
     cum = cumulative_km(route_coords)
     lons, lats, alongs = downsample_route(route_coords, cum, max(radius_km, 1.0))
@@ -106,9 +128,11 @@ def stops_along_route(stops, route_coords, radius_km=DEFAULT_RADIUS_KM):
             if best_d is None or d < best_d:
                 best_d, best_i = d, i
         if best_d <= radius_km:
-            found.append((stop, best_d, alongs[best_i]))
+            # Snap the marker to the nearest vertex on the route
+            found.append((stop, best_d, alongs[best_i], lons[best_i], lats[best_i]))
     found.sort(key=lambda t: t[2])
     return found
+
 
 
 def plan_fuel_stops(
@@ -137,8 +161,15 @@ def plan_fuel_stops(
 
     # Only stops with a known price (in the chosen column) can serve as fuel-ups.
     priced = [
-        {"stop": s, "off_km": off, "along_km": along, "price": float(getattr(s, price_attr))}
-        for (s, off, along) in along_stops
+        {
+            "stop": s,
+            "off_km": off,
+            "along_km": along,
+            "price": float(getattr(s, price_attr)),
+            "snapped_lon": slon,
+            "snapped_lat": slat,
+        }
+        for (s, off, along, slon, slat) in along_stops
         if getattr(s, price_attr) is not None
     ]
     priced.sort(key=lambda c: c["along_km"])
@@ -154,6 +185,18 @@ def plan_fuel_stops(
         choice = min(window, key=lambda c: c["price"])
         selected.append(choice)
         pos = choice["along_km"]
+
+    # Fuel left on arrival. The range-driven loop above is the set of *physical*
+    # refuels (the one-tank "buy once" case below is only a pricing fiction, not
+    # a real stop). Assuming the truck departs full and tops up to full at each
+    # stop, arrival fuel = tank capacity minus the burn over the final leg.
+    tank_capacity_gallons = range_miles / mpg
+    if feasible:
+        last_fill_km = selected[-1]["along_km"] if selected else 0.0
+        final_leg_miles = (total_km - last_fill_km) / KM_PER_MILE
+        arrival_gallons = max(0.0, tank_capacity_gallons - final_leg_miles / mpg)
+    else:
+        arrival_gallons = None  # trip can't be completed as planned
 
     # Trip fits in one tank: still buy fuel once, at the cheapest stop on route.
     if feasible and not selected and priced:
@@ -178,4 +221,6 @@ def plan_fuel_stops(
         "fuel_stops": selected,
         "total_gallons": total_miles / mpg,
         "total_cost": total_cost,
+        "arrival_gallons": arrival_gallons,
+        "tank_capacity_gallons": tank_capacity_gallons,
     }
