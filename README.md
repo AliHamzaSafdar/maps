@@ -1,10 +1,10 @@
-# 📍 Spotter — Fuel Stop Routing Planner
+# 📍 Mapper — Fuel Stop Routing Planner
 
-Spotter is a Django-based web application designed to optimize long-haul trucking routes by identifying the most cost-effective fuel stops. By analyzing truck stops, retail prices, and geographic coordinates, Spotter calculates routes and suggests optimal refuelling locations within a specified driving range.
+Mapper is a Django-based web application designed to optimize long-haul trucking routes by identifying the most cost-effective fuel stops. By analyzing truck stops, retail prices, and geographic coordinates, Mapper calculates routes and suggests optimal refuelling locations within a specified driving range.
 
 This repository contains:
 
-1. **The Django Web App (`spotter`)**: Route planning engine, map visualization, auto-complete APIs, and database models.
+1. **The Django Web App (`Mapper`)**: Route planning engine, map visualization, auto-complete APIs, and database models.
 2. **The Geocoding Pipeline (`data.py` & `aws_geocode_parallel.ipynb`)**: Scripts to clean and match raw truck stop details with high-accuracy lat/lon coordinates.
 
 ---
@@ -20,7 +20,7 @@ graph TD
     D --> E
     E --> F[Django Management Command <br/>import_truck_stops]
     F --> G[(db.sqlite3 <br/>Django Database)]
-    G --> H[Spotter Web App <br/>Route Planner UI & backend solver]
+    G --> H[Mapper Web App <br/>Route Planner UI & backend solver]
 ```
 
 ---
@@ -65,7 +65,7 @@ A `.env` file is required in the root directory to store configuration secrets a
 Apply Django migrations to set up the SQLite database and create the required schema for `Place` models:
 
 ```bash
-python spotter/manage.py migrate
+python Mapper/manage.py migrate
 ```
 
 ### 4. Populate Database (Ingest Geocoded Data)
@@ -73,7 +73,7 @@ python spotter/manage.py migrate
 We have a pre-geocoded and cleaned dataset ready for ingestion. Run the custom Django management command to load it into the database:
 
 ```bash
-python spotter/manage.py import_truck_stops "output/data.csv" --clear
+python Mapper/manage.py import_truck_stops "output/data.csv" --clear
 ```
 
 > [!TIP]
@@ -84,7 +84,7 @@ python spotter/manage.py import_truck_stops "output/data.csv" --clear
 Start the local development server:
 
 ```bash
-python spotter/manage.py runserver
+python Mapper/manage.py runserver
 ```
 
 Open your browser and navigate to: **[http://127.0.0.1:8000/](http://127.0.0.1:8000/)**
@@ -127,7 +127,7 @@ python data.py --rows 50 --use-ai
 
 ## ⚡ API Endpoint & Postman / cURL Examples
 
-Spotter supports a JSON API view by adding `format=json` as a query parameter or specifying `Accept: application/json` in your request headers.
+Mapper supports a JSON API view by adding `format=json` as a query parameter or specifying `Accept: application/json` in your request headers.
 
 ### Query Parameters
 
